@@ -14,11 +14,14 @@ import subprocess
 import sys
 import textwrap
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import partial
 from os.path import abspath, relpath
 from pathlib import Path, PurePath
 from time import perf_counter
 from urllib.parse import urlparse
+
+from tqdm import tqdm
 
 from west import util
 from west.commands import CommandError, Verbosity, WestCommand
@@ -1191,19 +1194,18 @@ class Update(_ProjectCommand):
             importer=self.update_importer,
             import_flags=ImportFlag.FORCE_PROJECTS)
 
-        failed = []
+        projects = []
         for project in self.manifest.projects:
             if (isinstance(project, ManifestProject) or
                     project.name in self.updated):
                 continue
-            try:
-                if not self.project_is_active(project):
-                    self.dbg(f'{project.name}: skipping inactive project')
-                    continue
-                self.update(project)
-                self.updated.add(project.name)
-            except subprocess.CalledProcessError:
-                failed.append(project)
+            if not self.project_is_active(project):
+                self.dbg(f'{project.name}: skipping inactive project')
+                continue
+            projects.append(project)
+            self.updated.add(project.name)
+
+        failed = self.update_projects_parallel(projects)
         self._handle_failed(self.args, failed)
 
     def update_importer(self, project, path):
@@ -1263,14 +1265,8 @@ class Update(_ProjectCommand):
         else:
             projects = self._projects(self.args.projects)
 
-        failed = []
-        for project in projects:
-            if isinstance(project, ManifestProject):
-                continue
-            try:
-                self.update(project)
-            except subprocess.CalledProcessError:
-                failed.append(project)
+        projects_to_update = [p for p in projects if not isinstance(p, ManifestProject)]
+        failed = self.update_projects_parallel(projects_to_update)
         self._handle_failed(self.args, failed)
 
     def toplevel_projects(self):
@@ -1320,6 +1316,19 @@ class Update(_ProjectCommand):
             return cfg
         else:
             return 'smart'
+
+    def update_projects_parallel(self, projects):
+        failed = []
+        with ThreadPoolExecutor() as executor:
+            futures = {executor.submit(self.update, p): p for p in projects}
+            for future in tqdm(as_completed(futures), total=len(futures),
+                               desc='Updating projects', unit='project'):
+                project = futures[future]
+                try:
+                    future.result()
+                except subprocess.CalledProcessError:
+                    failed.append(project)
+        return failed
 
     def update_submodules(self, project):
         # Updates given project submodules by using
