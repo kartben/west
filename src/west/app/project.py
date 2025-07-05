@@ -14,11 +14,14 @@ import subprocess
 import sys
 import textwrap
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 from functools import partial
 from os.path import abspath, relpath
 from pathlib import Path, PurePath
 from time import perf_counter
 from urllib.parse import urlparse
+from tqdm import tqdm
 
 from west import util
 from west.commands import CommandError, Verbosity, WestCommand
@@ -1175,6 +1178,28 @@ class Update(_ProjectCommand):
 
         self.fs = self.fetch_strategy()
 
+    def _parallel_update(self, projects):
+        lock = threading.Lock()
+        failed = []
+
+        def worker(project):
+            try:
+                if not self.project_is_active(project):
+                    self.dbg(f'{project.name}: skipping inactive project')
+                    return
+                self.update(project)
+                with lock:
+                    self.updated.add(project.name)
+            except subprocess.CalledProcessError:
+                with lock:
+                    failed.append(project)
+
+        with ThreadPoolExecutor() as exe:
+            futs = [exe.submit(worker, p) for p in projects]
+            for _ in tqdm(as_completed(futs), total=len(futs), disable=not sys.stderr.isatty(), leave=False):
+                pass
+        return failed
+
     def update_all(self):
         # Plain 'west update' is the 'easy' case: since the user just
         # wants us to update everything, we don't have to keep track
@@ -1191,19 +1216,10 @@ class Update(_ProjectCommand):
             importer=self.update_importer,
             import_flags=ImportFlag.FORCE_PROJECTS)
 
-        failed = []
-        for project in self.manifest.projects:
-            if (isinstance(project, ManifestProject) or
-                    project.name in self.updated):
-                continue
-            try:
-                if not self.project_is_active(project):
-                    self.dbg(f'{project.name}: skipping inactive project')
-                    continue
-                self.update(project)
-                self.updated.add(project.name)
-            except subprocess.CalledProcessError:
-                failed.append(project)
+        projects = [p for p in self.manifest.projects
+                    if not isinstance(p, ManifestProject)
+                    and p.name not in self.updated]
+        failed = self._parallel_update(projects)
         self._handle_failed(self.args, failed)
 
     def update_importer(self, project, path):
@@ -1263,14 +1279,8 @@ class Update(_ProjectCommand):
         else:
             projects = self._projects(self.args.projects)
 
-        failed = []
-        for project in projects:
-            if isinstance(project, ManifestProject):
-                continue
-            try:
-                self.update(project)
-            except subprocess.CalledProcessError:
-                failed.append(project)
+        projects = [p for p in projects if not isinstance(p, ManifestProject)]
+        failed = self._parallel_update(projects)
         self._handle_failed(self.args, failed)
 
     def toplevel_projects(self):
