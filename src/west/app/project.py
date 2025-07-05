@@ -20,6 +20,8 @@ from pathlib import Path, PurePath
 from time import perf_counter
 from urllib.parse import urlparse
 
+from tqdm import tqdm
+
 from west import util
 from west.commands import CommandError, Verbosity, WestCommand
 from west.configuration import Configuration
@@ -1192,14 +1194,15 @@ class Update(_ProjectCommand):
             import_flags=ImportFlag.FORCE_PROJECTS)
 
         failed = []
-        for project in self.manifest.projects:
-            if (isinstance(project, ManifestProject) or
-                    project.name in self.updated):
+        projects = [p for p in self.manifest.projects
+                    if not isinstance(p, ManifestProject) and
+                    p.name not in self.updated]
+        for project in tqdm(projects, desc='west update', unit='proj',
+                            file=sys.stderr, disable=False):
+            if not self.project_is_active(project):
+                self.dbg(f'{project.name}: skipping inactive project')
                 continue
             try:
-                if not self.project_is_active(project):
-                    self.dbg(f'{project.name}: skipping inactive project')
-                    continue
                 self.update(project)
                 self.updated.add(project.name)
             except subprocess.CalledProcessError:
@@ -1264,9 +1267,9 @@ class Update(_ProjectCommand):
             projects = self._projects(self.args.projects)
 
         failed = []
-        for project in projects:
-            if isinstance(project, ManifestProject):
-                continue
+        iterable = [p for p in projects if not isinstance(p, ManifestProject)]
+        for project in tqdm(iterable, desc='west update', unit='proj',
+                            file=sys.stderr, disable=False):
             try:
                 self.update(project)
             except subprocess.CalledProcessError:
