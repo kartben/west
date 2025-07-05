@@ -673,6 +673,10 @@ def test_update_projects(west_init_tmpdir):
     assert ur.kl_head_0 != ur.kl_head_1, 'failed updating kconfiglib HEAD'
     assert ur.tr_head_0 == ur.tr_head_1, 'tagged_repo HEAD changed'
 
+def test_update_progress_bar(west_init_tmpdir):
+    output = cmd('update', cwd=str(west_init_tmpdir), stderr=subprocess.STDOUT)
+    assert 'west update:' in output
+
 def test_update_projects_local_branch_commits(west_init_tmpdir):
     # Test the 'west update' command when working on local branch with local
     # commits and then updating project to upstream commit.
