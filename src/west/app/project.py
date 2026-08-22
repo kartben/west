@@ -1691,6 +1691,11 @@ class Update(_ProjectCommand):
         for project in projects:
             if isinstance(project, ManifestProject):
                 continue
+            if self.manifest.inactive_reason(project) == 'project-filter':
+                self.wrn(
+                    f'{project.name}: updating a project your '
+                    'manifest.project-filter configuration makes inactive'
+                )
             try:
                 self.update(project)
             except subprocess.CalledProcessError:

@@ -1261,6 +1261,7 @@ def test_update_some_frozen_resolution(repos_tmpdir):
     manifest = Manifest.from_topdir(topdir=ws)
     newproj = manifest.get_projects(['newproj'])[0]
     assert not manifest.is_active(newproj)
+    assert manifest.inactive_reason(newproj) == 'group-filter'
     assert not newproj.is_cloned()
 
     # An inactive project defined via an import can be materialized by
@@ -1271,6 +1272,33 @@ def test_update_some_frozen_resolution(repos_tmpdir):
     assert newproj.is_cloned()
     with open(ws / '.west' / 'config', encoding='utf-8') as f:
         assert f.read() == config_before
+
+
+def test_update_project_filter_warning(west_init_tmpdir):
+    # Explicitly excluding a project with manifest.project-filter is
+    # not the same as group inactivity, and the difference is exposed
+    # by Manifest.inactive_reason(). A named update still operates on
+    # such a project, as it always has for inactive projects, but it
+    # warns, so the override is visible.
+
+    cmd('config manifest.project-filter -- -tagged_repo')
+
+    manifest = Manifest.from_topdir(topdir=west_init_tmpdir)
+    tagged_repo = manifest.get_projects(['tagged_repo'])[0]
+    kconfiglib = manifest.get_projects(['Kconfiglib'])[0]
+    assert not manifest.is_active(tagged_repo)
+    assert manifest.inactive_reason(tagged_repo) == 'project-filter'
+    assert manifest.is_active(kconfiglib)
+    assert manifest.inactive_reason(kconfiglib) is None
+
+    out = cmd('update tagged_repo')
+    assert 'manifest.project-filter' in out
+    assert tagged_repo.is_cloned()
+
+    # No warning for a project that is active, or merely
+    # group-inactive.
+    out = cmd('update Kconfiglib')
+    assert 'manifest.project-filter' not in out
 
 
 def test_update_submodules_list(repos_tmpdir):

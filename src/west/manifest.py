@@ -1866,6 +1866,29 @@ class Manifest:
         the workspace for purposes like updating, listing, resolving
         imports, etc.
 
+        To learn why an inactive project is inactive, use
+        inactive_reason().
+
+        :param project: project to check
+        :param extra_filter: an optional additional group filter
+        '''
+
+        return self.inactive_reason(project, extra_filter) is None
+
+    def inactive_reason(
+        self, project: Project, extra_filter: Iterable[str] | None = None
+    ) -> str | None:
+        '''Why is_active() would return False for *project*, if it would.
+
+        Returns None if the project is active. Otherwise, returns
+        'project-filter' if the manifest.project-filter configuration
+        option makes the project inactive, or 'group-filter' if all of
+        the project's groups are disabled.
+
+        This lets tools distinguish a project the user deliberately
+        excluded from one that is inactive merely because none of its
+        groups are enabled.
+
         :param project: project to check
         :param extra_filter: an optional additional group filter
         '''
@@ -1873,9 +1896,9 @@ class Manifest:
         if not isinstance(project, ManifestProject):
             pfr = self._pfr(project)
             if pfr == PFR.ACTIVE:
-                return True
+                return None
             elif pfr == PFR.INACTIVE:
-                return False
+                return 'project-filter'
 
         if not project.groups:
             # Projects without any groups are always active, so just
@@ -1883,7 +1906,7 @@ class Manifest:
             # ManifestProject as though it's always active. This is
             # important for keeping it in the 'west list' output for
             # now.
-            return True
+            return None
 
         # Parse manifest.group-filter from the configuration file if we
         # haven't already.
@@ -1901,7 +1924,9 @@ class Manifest:
         else:
             disabled_groups = self._disabled_groups
 
-        return any(group not in disabled_groups for group in project.groups)
+        if any(group not in disabled_groups for group in project.groups):
+            return None
+        return 'group-filter'
 
     def _pfr(self, project: Project) -> PFR:
         # Internal helper for checking if a project has been
