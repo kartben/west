@@ -1340,6 +1340,20 @@ class Update(_ProjectCommand):
 
             You must have already created a west workspace with "west init".
 
+            With no arguments, all active projects are updated, refreshing
+            manifest data imported from other projects along the way.
+
+            With PROJECT arguments, each named project is updated to its
+            definition in the current resolved manifest: the same view of
+            the workspace that "west list" and "west manifest --resolve"
+            present, with imported manifest data read from the projects'
+            checked out manifest-rev revisions. Projects carrying imports
+            are deliberately not refreshed first, so naming a project
+            always materializes exactly what the current resolution
+            describes; run plain "west update" to refresh the manifests
+            themselves. Named projects are updated whether or not they
+            are active.
+
             This command does not alter the manifest repository's contents.'''),
         )
 
@@ -1652,22 +1666,24 @@ class Update(_ProjectCommand):
             )
 
     def update_some(self):
-        # The 'west update PROJECT [...]' style invocation is only
-        # implemented for projects defined within the manifest
-        # repository.
+        # The 'west update PROJECT [...]' style invocation updates each
+        # named project to its definition in the current resolved
+        # manifest, reading imported manifest data from the projects'
+        # checked out manifest-rev revisions, exactly like 'west list'
+        # and 'west manifest --resolve' do.
         #
-        # It's unclear how to do this properly in the case of
-        # a project A whose definition is imported from
-        # another project B, especially when B.revision is not
-        # a fixed SHA. Do we forcibly need to update B first?
-        # Should we skip it? Should it be configurable? Etc.
-        #
-        # For now, just refuse to do so. We can try to relax
-        # this restriction if it proves cumbersome.
+        # The import chain is deliberately not updated first: tooling
+        # that just resolved the manifest to discover a project can
+        # materialize precisely what that resolution named, and plain
+        # 'west update' remains the way to refresh the manifests
+        # themselves. This also composes into a staged bootstrap:
+        # updating an import-bearing project by name makes the projects
+        # its manifest defines resolvable, and therefore updatable by
+        # name, without updating anything else.
 
         if not self.has_manifest or self.manifest.has_imports:
-            projects = self.toplevel_projects()
-            assert self.has_manifest  # toplevel_projects() must ensure this.
+            projects = self.resolved_projects()
+            assert self.has_manifest  # resolved_projects() must ensure this.
         else:
             projects = self._projects(self.args.projects)
 
@@ -1675,22 +1691,33 @@ class Update(_ProjectCommand):
         for project in projects:
             if isinstance(project, ManifestProject):
                 continue
+            if self.manifest.inactive_reason(project) == 'project-filter':
+                self.wrn(
+                    f'{project.name}: updating a project your '
+                    'manifest.project-filter configuration makes inactive'
+                )
             try:
                 self.update(project)
             except subprocess.CalledProcessError:
                 failed.append(project)
         self._handle_failed(self.args, failed)
 
-    def toplevel_projects(self):
-        # Return a list of projects from self.args.projects, or scream
-        # and die if any projects are either unknown or not defined in
-        # the manifest repository.
+    def resolved_projects(self):
+        # Return a list of projects from self.args.projects, resolved
+        # against the current manifest, or scream and die if any of
+        # them are unknown or the manifest cannot be resolved.
         #
         # As a side effect, ensures self.manifest is set.
 
         ids = self.args.projects
         assert ids
 
+        # Projects defined in the manifest repository can be looked up
+        # without resolving imports, and their definitions take
+        # precedence over imported ones, so the resolved manifest
+        # agrees with this parse about them. Preferring it means that
+        # naming only such projects keeps working in workspaces whose
+        # imports are not cloned yet.
         self.manifest = Manifest.from_file(import_flags=ImportFlag.IGNORE_PROJECTS)
         mr_projects, mr_unknown = projects_unknown(self.manifest, ids)
         if not mr_unknown:
@@ -1701,24 +1728,14 @@ class Update(_ProjectCommand):
         except ManifestImportFailed:
             self.die(
                 'one or more projects are unknown or defined via '
-                'imports; please run plain "west update".'
+                'manifest imports that cannot be resolved; '
+                'run plain "west update" first.'
             )
 
-        _, unknown = projects_unknown(self.manifest, ids)
+        projects, unknown = projects_unknown(self.manifest, ids)
         if unknown:
             self._die_unknown(unknown)
-        else:
-            # All of the ids are known projects, but some of them
-            # are not defined in the manifest repository.
-            mr_unknown_set = set(mr_unknown)
-            from_projects = [p for p in ids if p in mr_unknown_set]
-            self.die(
-                'refusing to update project: '
-                + " ".join(from_projects)
-                + '\n'
-                + '  It or they were resolved via project imports.\n'
-                '  Only plain "west update" can currently update them.'
-            )
+        return projects
 
     def fetch_strategy(self):
         cfg = self.config.get('update.fetch')
