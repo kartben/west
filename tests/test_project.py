@@ -1107,12 +1107,12 @@ def test_update_head_0(west_init_tmpdir):
 
 
 def test_update_some_with_imports(repos_tmpdir):
-    # 'west update project1 project2' should work fine even when
-    # imports are used, as long as the relevant projects are all
-    # defined in the manifest repository.
-    #
-    # It currently should fail with a helpful message if the projects
-    # are resolved via project imports.
+    # 'west update project1 project2' updates each named project to
+    # its definition in the current resolved manifest. For projects
+    # defined in the manifest repository that resolution never needs
+    # the imports; for projects defined via project imports, it reads
+    # the importing projects' checked out manifest-rev revisions, so
+    # it works as soon as those are cloned.
 
     remotes = repos_tmpdir / 'repos'
     zephyr = remotes / 'zephyr'
@@ -1150,15 +1150,16 @@ def test_update_some_with_imports(repos_tmpdir):
     with pytest.raises(SystemExit):
         cmd('update unknown-project', cwd=ws)
 
-    # Updating a list of projects when some are resolved via project
-    # imports must fail.
+    # Naming a project defined via a project import must fail while
+    # the manifest cannot be resolved, i.e. while zephyr is not
+    # cloned yet.
 
     with pytest.raises(SystemExit):
         cmd('update Kconfiglib net-tools', cwd=ws)
 
-    # Updates of projects defined in the manifest repository or all
-    # projects must succeed, and behave the same as if no imports
-    # existed.
+    # Updates of projects defined in the manifest repository must
+    # succeed without the imports being resolvable, and behave the
+    # same as if no imports existed.
 
     cmd('update net-tools', cwd=ws)
     with pytest.raises(ManifestImportFailed):
@@ -1173,9 +1174,103 @@ def test_update_some_with_imports(repos_tmpdir):
     cmd('update zephyr', cwd=ws)
     assert zephyr_project.is_cloned()
 
+    # With zephyr cloned the manifest resolves, so a project defined
+    # in zephyr's manifest can now be updated by name, and nothing
+    # else is touched. This is the staged bootstrap: each named
+    # update makes more of the manifest resolvable.
+
+    cmd('update Kconfiglib', cwd=ws)
+    manifest = Manifest.from_topdir(topdir=ws)
+    projects = manifest.get_projects(['Kconfiglib', 'tagged_repo'])
+    assert projects[0].is_cloned()
+    assert not projects[1].is_cloned()
+
     cmd('update', cwd=ws)
     manifest = Manifest.from_topdir(topdir=ws)
+    assert manifest.get_projects(['tagged_repo'])[0].is_cloned()
+
+
+def test_update_some_frozen_resolution(repos_tmpdir):
+    # A named update materializes a project as the *current* resolved
+    # manifest defines it: imported manifest data is read from the
+    # importing projects' checked out manifest-rev revisions, and the
+    # import chain is not refreshed first. Plain 'west update' is what
+    # refreshes it.
+
+    remotes = repos_tmpdir / 'repos'
+    zephyr = remotes / 'zephyr'
+
+    ws = repos_tmpdir / 'ws'
+    create_workspace(ws)
+    add_commit(
+        ws / 'mp',
+        'manifest repo commit',
+        files={
+            'west.yml': f"""
+                      manifest:
+                        projects:
+                        - name: zephyr
+                          url: {zephyr}
+                          import: true
+                      """
+        },
+    )
+
+    # Nothing is resolvable until the import-bearing project exists.
+    with pytest.raises(SystemExit):
+        cmd('update Kconfiglib', cwd=ws)
+
+    cmd('update zephyr', cwd=ws)
+    zephyr_ws = ws / 'zephyr'
+    zephyr_mr_0 = rev_parse(zephyr_ws, 'manifest-rev')
+
+    # A project defined by the imported manifest can now be updated by
+    # name, alone: nothing else gets cloned.
+    cmd('update Kconfiglib', cwd=ws)
+    manifest = Manifest.from_topdir(topdir=ws)
     assert manifest.get_projects(['Kconfiglib'])[0].is_cloned()
+    assert not manifest.get_projects(['tagged_repo'])[0].is_cloned()
+
+    # The imported manifest changes upstream: it gains a project, in a
+    # group the imported manifest disables.
+    with open(zephyr / 'west.yml', encoding='utf-8') as f:
+        data = yaml.safe_load(f)
+    data['manifest']['group-filter'] = ['-optional']
+    data['manifest']['projects'].append(
+        {
+            'name': 'newproj',
+            'url': str(remotes / 'tagged_repo'),
+            'revision': 'v1.0',
+            'path': 'newproj',
+            'groups': ['optional'],
+        }
+    )
+    add_commit(zephyr, 'add newproj', files={'west.yml': yaml.safe_dump(data)})
+
+    # Named updates keep following the frozen resolution: the importer
+    # is not moved, and the new project is not visible yet.
+    with pytest.raises(SystemExit):
+        cmd('update newproj', cwd=ws)
+    cmd('update Kconfiglib', cwd=ws)
+    assert rev_parse(zephyr_ws, 'manifest-rev') == zephyr_mr_0
+
+    # Plain 'west update' refreshes the manifests. The new project is
+    # now resolvable, but inactive, so it is not cloned.
+    cmd('update', cwd=ws)
+    assert rev_parse(zephyr_ws, 'manifest-rev') != zephyr_mr_0
+    manifest = Manifest.from_topdir(topdir=ws)
+    newproj = manifest.get_projects(['newproj'])[0]
+    assert not manifest.is_active(newproj)
+    assert not newproj.is_cloned()
+
+    # An inactive project defined via an import can be materialized by
+    # name, without touching the workspace configuration.
+    with open(ws / '.west' / 'config', encoding='utf-8') as f:
+        config_before = f.read()
+    cmd('update newproj', cwd=ws)
+    assert newproj.is_cloned()
+    with open(ws / '.west' / 'config', encoding='utf-8') as f:
+        assert f.read() == config_before
 
 
 def test_update_submodules_list(repos_tmpdir):
